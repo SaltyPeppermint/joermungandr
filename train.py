@@ -1,16 +1,24 @@
 from datetime import datetime
+from typing import Callable, Tuple
 
 import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
+from jax import Array
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from tensorboardX import SummaryWriter
 
 from checkpoint import save_checkpoint
 from config import ModelConfig, TrainConfig
+from data import Batch, dummy_data_generator
 from model import Encoder
+
+TrainStep = Callable[
+    [Encoder, nnx.Optimizer, Batch],
+    Tuple[Array, Array, Array, Encoder, nnx.Optimizer],
+]
 
 
 def create_scheduler(config: TrainConfig) -> optax.Schedule:
@@ -25,51 +33,49 @@ def create_scheduler(config: TrainConfig) -> optax.Schedule:
     )
 
 
-def create_train_step(mesh: Mesh):
+def create_train_step(mesh: Mesh) -> TrainStep:
     """Create a JIT-compiled training step with data-parallel sharding."""
     data_sharding = NamedSharding(mesh, P("data"))
 
     @jax.jit
-    def train_step(model, optimizer, batch):
+    def train_step(
+        model: Encoder,
+        optimizer: nnx.Optimizer,
+        batch: Batch,
+    ) -> Tuple[Array, Array, Array, Encoder, nnx.Optimizer]:
         """
         Execute a single training step with data parallelism.
 
         Args:
-            batch: Tuple of (input_ids, seg_ids, mlm_targets, mlm_mask, nsp_labels)
-                - input_ids: [B, L] token IDs
-                - seg_ids: [B, L] segment IDs
-                - mlm_targets: [B, L] target token IDs for MLM
-                - mlm_mask: [B, L] boolean mask for MLM positions
-                - nsp_labels: [B] binary labels for NSP
+            batch: A `Batch` object containing training data.
 
         Returns:
-            Tuple of (total_loss, mlm_loss, nsp_loss), each a scalar.
+            Tuple of (total_loss, mlm_loss, nsp_loss), each a scalar, plus the
+            updated model and optimizer.
         """
-        input_ids, seg_ids, mlm_targets, mlm_mask, nsp_labels = batch
+        batch = jax.device_put(batch, data_sharding)
 
-        def loss_fn(model):
-            mlm_logits, nsp_logits = model(input_ids, seg_ids)
+        def loss_fn(model: Encoder) -> Tuple[Array, Tuple[Array, Array]]:
+            mlm_logits, nsp_logits = model(batch.input_ids, batch.seg_ids)
 
-            mlm_losses = optax.softmax_cross_entropy_with_integer_labels(mlm_logits, mlm_targets)
-            mlm_loss = jnp.sum(mlm_losses * mlm_mask) / (jnp.sum(mlm_mask) + 1e-9)
+            mlm_losses = optax.softmax_cross_entropy_with_integer_labels(
+                mlm_logits, batch.mlm_targets
+            )
+            mlm_loss = jnp.sum(mlm_losses * batch.mlm_mask) / (jnp.sum(batch.mlm_mask) + 1e-9)
 
             nsp_loss = jnp.mean(
-                optax.softmax_cross_entropy_with_integer_labels(nsp_logits, nsp_labels)
+                optax.softmax_cross_entropy_with_integer_labels(nsp_logits, batch.nsp_labels)
             )
             return mlm_loss + nsp_loss, (mlm_loss, nsp_loss)
 
         (loss, (mlm_loss, nsp_loss)), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
         optimizer.update(model, grads)
-        return loss, mlm_loss, nsp_loss
+        return loss, mlm_loss, nsp_loss, model, optimizer
 
-    def sharded_step(model, optimizer, batch):
-        batch = jax.device_put(batch, data_sharding)
-        return train_step(model, optimizer, batch)
-
-    return sharded_step
+    return train_step
 
 
-def train_loop(model_config: ModelConfig, train_config: TrainConfig):
+def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
     """Run the training loop with TensorBoard logging and multi-GPU data parallelism."""
 
     # Set up checkpoint directory
@@ -110,26 +116,16 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig):
     writer.add_text("train_config", str(train_config))
     writer.add_text("devices", f"{num_devices} device(s)")
 
+    data_generator = dummy_data_generator(model_config, train_config, global_batch_size, rngs)
+
     print(f"Logging to {log_dir}")
     print("Starting training...")
     print(f"{'Step':<6} | {'Total Loss':<12} | {'MLM Loss':<10} | {'NSP Loss':<10} | {'LR':<10}")
     print("-" * 60)
 
     for step in range(train_config.total_steps):
-        # Generate dummy batch
-        inp = jax.random.randint(
-            rngs.step(), (global_batch_size, train_config.seq_len), 0, model_config.vocab_size
-        )
-        seg = jax.random.randint(
-            rngs.step(), (global_batch_size, train_config.seq_len), 0, model_config.num_segments
-        )
-        mlm_mask = jax.random.uniform(rngs.step(), (global_batch_size, train_config.seq_len)) < 0.15
-        mlm_targets = jax.random.randint(
-            rngs.step(), (global_batch_size, train_config.seq_len), 0, model_config.vocab_size
-        )
-        nsp_labels = jax.random.randint(rngs.step(), (global_batch_size,), 0, 2)
-
-        loss, mlm, nsp = train_step(model, optimizer, (inp, seg, mlm_targets, mlm_mask, nsp_labels))
+        batch = next(data_generator)
+        loss, mlm, nsp, model, optimizer = train_step(model, optimizer, batch)
         current_lr = scheduler(optimizer.step.value)
 
         # Logged losses are from one shard only (noisier but unbiased estimate of global loss)
@@ -140,7 +136,7 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig):
 
         if step % train_config.log_interval == 0:
             print(
-                f"{step:<6} | {loss:.4f}       | {mlm:.4f}     | {nsp:.4f}     | {current_lr:.6f}"
+                f"{step:<6} | {float(loss):.4f}       | {float(mlm):.4f}     | {float(nsp):.4f}     | {current_lr:.6f}"
             )
 
         if ckpt_path and (step + 1) % train_config.save_interval == 0:

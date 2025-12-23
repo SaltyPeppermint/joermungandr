@@ -9,16 +9,44 @@ from config import ModelConfig
 class SwiGLU(nnx.Module):
     """SwiGLU feed-forward network."""
 
-    def __init__(self, config: ModelConfig, rngs: nnx.Rngs):
-        self.w1 = nnx.Linear(config.dim, config.intermediate_dim, use_bias=False, rngs=rngs)
-        self.w2 = nnx.Linear(config.dim, config.intermediate_dim, use_bias=False, rngs=rngs)
-        self.w3 = nnx.Linear(config.intermediate_dim, config.dim, use_bias=False, rngs=rngs)
+    def __init__(
+        self,
+        config: ModelConfig,
+        rngs: nnx.Rngs,
+        *,
+        dtype: jnp.dtype = jnp.bfloat16,
+        param_dtype: jnp.dtype = jnp.float32,
+    ):
+        self.w1 = nnx.Linear(
+            config.dim,
+            config.intermediate_dim,
+            use_bias=False,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
+        self.w2 = nnx.Linear(
+            config.dim,
+            config.intermediate_dim,
+            use_bias=False,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
+        self.w3 = nnx.Linear(
+            config.intermediate_dim,
+            config.dim,
+            use_bias=False,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
 
     def __call__(self, x: Array) -> Array:
         return self.w3(nnx.silu(self.w1(x)) * self.w2(x))
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> Array:
+def precompute_freqs_cis(dim: int, end: int, theta: float) -> Array:
     """
     Precompute complex exponential frequencies for rotary position embeddings.
 
@@ -47,6 +75,9 @@ def apply_rope(x: Array, freqs_cis: Array) -> Array:
     Returns:
         Tensor of shape [B, H, L, D] with rotary embeddings applied.
     """
+    original_dtype = x.dtype
+    x = x.astype(jnp.float32)
+
     B, H, L, D = x.shape
     # Pair adjacent elements as complex: [B, H, L, D] -> [B, H, L, D//2] complex
     x_complex = jax.lax.complex(x[..., 0::2], x[..., 1::2])
@@ -54,31 +85,62 @@ def apply_rope(x: Array, freqs_cis: Array) -> Array:
     freqs_cis = freqs_cis[None, None, :L, :]
     x_out = x_complex * freqs_cis
     # Unpack complex back to real: [B, H, L, D//2] complex -> [B, H, L, D]
-    return jnp.stack([jnp.real(x_out), jnp.imag(x_out)], axis=-1).reshape(B, H, L, D)
+    out = jnp.stack([jnp.real(x_out), jnp.imag(x_out)], axis=-1).reshape(B, H, L, D)
+
+    return out.astype(original_dtype)
 
 
 class GQA(nnx.Module):
     """Grouped-query attention with rotary position (RoPE) embeddings."""
 
-    def __init__(self, config: ModelConfig, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        config: ModelConfig,
+        rngs: nnx.Rngs,
+        *,
+        dtype: jnp.dtype = jnp.bfloat16,
+        param_dtype: jnp.dtype = jnp.float32,
+    ):
         self.num_heads = config.num_heads
         self.num_kv = config.num_kv_heads
         self.head_dim = config.dim // config.num_heads
 
         self.q_proj = nnx.Linear(
-            config.dim, config.num_heads * self.head_dim, use_bias=False, rngs=rngs
+            config.dim,
+            config.num_heads * self.head_dim,
+            use_bias=False,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
         )
         self.k_proj = nnx.Linear(
-            config.dim, config.num_kv_heads * self.head_dim, use_bias=False, rngs=rngs
+            config.dim,
+            config.num_kv_heads * self.head_dim,
+            use_bias=False,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
         )
         self.v_proj = nnx.Linear(
-            config.dim, config.num_kv_heads * self.head_dim, use_bias=False, rngs=rngs
+            config.dim,
+            config.num_kv_heads * self.head_dim,
+            use_bias=False,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
         )
         self.o_proj = nnx.Linear(
-            config.num_heads * self.head_dim, config.dim, use_bias=False, rngs=rngs
+            config.num_heads * self.head_dim,
+            config.dim,
+            use_bias=False,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
         )
 
-        self.freqs_cis = nnx.Cache(precompute_freqs_cis(self.head_dim, config.max_len))
+        self.freqs_cis = nnx.Cache(
+            precompute_freqs_cis(self.head_dim, config.max_len, config.rope_theta)
+        )
 
     def __call__(self, x: Array, mask: Array | None = None) -> Array:
         """
@@ -107,6 +169,8 @@ class GQA(nnx.Module):
         k = apply_rope(k, self.freqs_cis.value)
 
         # Attention: [B, H, L, head_dim] -> [B, H, L, head_dim]
+        # K and V heads are automatically broadcasted to match the number of query
+        # heads in JAX's dot-product attention, which is what we need for GQA.
         out = jax.nn.dot_product_attention(q, k, v, mask=mask)
 
         # Transpose back: [B, H, L, head_dim] -> [B, L, H, head_dim] -> [B, L, D]
@@ -117,11 +181,18 @@ class GQA(nnx.Module):
 class TransformerBlock(nnx.Module):
     """Pre-norm transformer block with GQA attention and SwiGLU MLP."""
 
-    def __init__(self, config: ModelConfig, rngs: nnx.Rngs):
-        self.norm1 = nnx.RMSNorm(config.dim, rngs=rngs)
-        self.attn = GQA(config, rngs=rngs)
-        self.norm2 = nnx.RMSNorm(config.dim, rngs=rngs)
-        self.mlp = SwiGLU(config, rngs=rngs)
+    def __init__(
+        self,
+        config: ModelConfig,
+        rngs: nnx.Rngs,
+        *,
+        dtype: jnp.dtype = jnp.bfloat16,
+        param_dtype: jnp.dtype = jnp.float32,
+    ):
+        self.norm1 = nnx.RMSNorm(config.dim, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
+        self.attn = GQA(config, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
+        self.norm2 = nnx.RMSNorm(config.dim, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
+        self.mlp = SwiGLU(config, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
 
     def __call__(self, x: Array, mask: Array | None = None) -> Array:
         x = x + self.attn(self.norm1(x), mask)
@@ -132,15 +203,38 @@ class TransformerBlock(nnx.Module):
 class Encoder(nnx.Module):
     """BERT-style encoder with MLM and NSP heads."""
 
-    def __init__(self, config: ModelConfig, rngs: nnx.Rngs):
-        self.tok_emb = nnx.Embed(config.vocab_size, config.dim, rngs=rngs)
-        self.seg_emb = nnx.Embed(config.num_segments, config.dim, rngs=rngs)
-        self.blocks = nnx.List(
-            [TransformerBlock(config, rngs=rngs) for _ in range(config.num_layers)]
+    def __init__(
+        self,
+        config: ModelConfig,
+        rngs: nnx.Rngs,
+        *,
+        dtype: jnp.dtype = jnp.bfloat16,
+        param_dtype: jnp.dtype = jnp.float32,
+    ):
+        self.tok_emb = nnx.Embed(
+            config.vocab_size, config.dim, rngs=rngs, dtype=dtype, param_dtype=param_dtype
         )
-        self.norm_final = nnx.RMSNorm(config.dim, rngs=rngs)
-        self.mlm_head = nnx.Linear(config.dim, config.vocab_size, use_bias=False, rngs=rngs)
-        self.nsp_head = nnx.Linear(config.dim, 2, use_bias=False, rngs=rngs)
+        self.seg_emb = nnx.Embed(
+            config.num_segments, config.dim, rngs=rngs, dtype=dtype, param_dtype=param_dtype
+        )
+        self.blocks = nnx.List(
+            [
+                TransformerBlock(config, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
+                for _ in range(config.num_layers)
+            ]
+        )
+        self.norm_final = nnx.RMSNorm(config.dim, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
+        self.mlm_head = nnx.Linear(
+            config.dim,
+            config.vocab_size,
+            use_bias=False,
+            rngs=rngs,
+            dtype=dtype,
+            param_dtype=param_dtype,
+        )
+        self.nsp_head = nnx.Linear(
+            config.dim, 2, use_bias=False, rngs=rngs, dtype=dtype, param_dtype=param_dtype
+        )
 
     def __call__(
         self, input_ids: Array, seg_ids: Array, mask: Array | None = None

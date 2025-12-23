@@ -14,6 +14,7 @@ class ModelConfig:
     num_segments: int = 3
     intermediate_dim: int = 2048
     max_len: int = 512
+    rope_theta: float = 10000.0
 
 
 @dataclass
@@ -31,6 +32,7 @@ class TrainConfig:
     batch_size_per_device: int = 8
     seq_len: int = 32
     seed: int = 42
+    mlm_mask_prob: float = 0.15
 
     # Logging and checkpointing
     log_interval: int = 10
