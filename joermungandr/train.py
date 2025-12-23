@@ -27,42 +27,32 @@ def create_scheduler(config: TrainConfig) -> optax.Schedule:
     )
 
 
-def create_train_step(mesh: Mesh):
-    """Create a JIT-compiled training step with data-parallel sharding."""
-    data_sharding = NamedSharding(mesh, P("data"))
+@nnx.jit(donate_argnames=("model", "optimizer"), static_argnames=("data_sharding",))
+def train_step(
+    model: Encoder, optimizer: nnx.Optimizer, batch: Batch, data_sharding: NamedSharding
+) -> tuple[Array, Array, Array, Encoder, nnx.Optimizer]:
+    """Execute a single training step with data parallelism.
 
-    @jax.jit
-    def train_step(
-        model: Encoder, optimizer: nnx.Optimizer, batch: Batch
-    ) -> tuple[Array, Array, Array, Encoder, nnx.Optimizer]:
-        """Execute a single training step with data parallelism.
+    Returns:
+        (total_loss, mlm_loss, nsp_loss, model, optimizer)
+    """
+    batch = jax.device_put(batch, data_sharding)
 
-        Returns:
-            (total_loss, mlm_loss, nsp_loss, model, optimizer)
-        """
-        batch = jax.device_put(batch, data_sharding)
+    def loss_fn(model: Encoder) -> tuple[Array, tuple[Array, Array]]:
+        mlm_logits, nsp_logits = model(batch.input_ids, batch.seg_ids, mask=batch.attention_mask)
 
-        def loss_fn(model: Encoder) -> tuple[Array, tuple[Array, Array]]:
-            mlm_logits, nsp_logits = model(
-                batch.input_ids, batch.seg_ids, mask=batch.attention_mask
-            )
+        mlm_losses = optax.softmax_cross_entropy_with_integer_labels(mlm_logits, batch.mlm_targets)
+        mlm_loss = jnp.sum(mlm_losses * batch.mlm_mask) / (jnp.sum(batch.mlm_mask) + 1e-9)
 
-            mlm_losses = optax.softmax_cross_entropy_with_integer_labels(
-                mlm_logits, batch.mlm_targets
-            )
-            mlm_loss = jnp.sum(mlm_losses * batch.mlm_mask) / (jnp.sum(batch.mlm_mask) + 1e-9)
+        nsp_loss = jnp.mean(
+            optax.softmax_cross_entropy_with_integer_labels(nsp_logits, batch.nsp_labels)
+        )
 
-            nsp_loss = jnp.mean(
-                optax.softmax_cross_entropy_with_integer_labels(nsp_logits, batch.nsp_labels)
-            )
+        return mlm_loss + nsp_loss, (mlm_loss, nsp_loss)
 
-            return mlm_loss + nsp_loss, (mlm_loss, nsp_loss)
-
-        (loss, (mlm_loss, nsp_loss)), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
-        optimizer.update(model, grads)
-        return loss, mlm_loss, nsp_loss, model, optimizer
-
-    return train_step
+    (loss, (mlm_loss, nsp_loss)), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
+    optimizer.update(model, grads)
+    return loss, mlm_loss, nsp_loss, model, optimizer
 
 
 def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
@@ -81,8 +71,6 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
 
     print(f"Running on {num_devices} device(s), global batch size: {global_batch_size}")
 
-    replicated = NamedSharding(mesh, P())
-
     # Initialize model and optimizer
     rngs = nnx.Rngs(train_config.seed)
     model = Encoder(model_config, rngs=rngs)
@@ -95,10 +83,9 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
     optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
     # Replicate model and optimizer state across devices
+    replicated = NamedSharding(mesh, P())
     nnx.update(model, jax.device_put(nnx.state(model), replicated))
     nnx.update(optimizer, jax.device_put(nnx.state(optimizer), replicated))
-
-    train_step = create_train_step(mesh)
 
     log_dir = train_config.log_dir or f"runs/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     writer = SummaryWriter(log_dir)
@@ -106,6 +93,8 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
     writer.add_text("train_config", str(train_config))
     writer.add_text("devices", f"{num_devices} device(s)")
 
+    # Sharding data accross devices
+    data_sharding = NamedSharding(mesh, P("data"))
     data_generator = dummy_data_generator(model_config, train_config, global_batch_size, rngs)
 
     print(f"Logging to {log_dir}")
@@ -115,7 +104,7 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
 
     for step in range(train_config.total_steps):
         batch = next(data_generator)
-        loss, mlm, nsp, model, optimizer = train_step(model, optimizer, batch)
+        loss, mlm, nsp, model, optimizer = train_step(model, optimizer, batch, data_sharding)
         current_lr = scheduler(optimizer.step.value)
 
         # Logged losses are from one shard only (noisier but unbiased estimate of global loss)
