@@ -75,19 +75,25 @@ def apply_rope(x: Array, freqs_cis: Array) -> Array:
     Returns:
         Tensor of shape [B, H, L, D] with rotary embeddings applied.
     """
-    original_dtype = x.dtype
-    x = x.astype(jnp.float32)
-
     B, H, L, D = x.shape
-    # Pair adjacent elements as complex: [B, H, L, D] -> [B, H, L, D//2] complex
-    x_complex = jax.lax.complex(x[..., 0::2], x[..., 1::2])
-    # Broadcast freqs: [L, D//2] -> [1, 1, L, D//2]
-    freqs_cis = freqs_cis[None, None, :L, :]
-    x_out = x_complex * freqs_cis
-    # Unpack complex back to real: [B, H, L, D//2] complex -> [B, H, L, D]
-    out = jnp.stack([jnp.real(x_out), jnp.imag(x_out)], axis=-1).reshape(B, H, L, D)
+    # Cast freqs to the input dtype for mixed-precision training.
+    freqs_cos = jnp.real(freqs_cis).astype(x.dtype)
+    freqs_sin = jnp.imag(freqs_cis).astype(x.dtype)
 
-    return out.astype(original_dtype)
+    # Broadcast freqs: [L, D//2] -> [1, 1, L, D//2]
+    freqs_cos = freqs_cos[None, None, :L, :]
+    freqs_sin = freqs_sin[None, None, :L, :]
+
+    # Split input into real and imaginary parts.
+    x_real = x[..., 0::2]
+    x_imag = x[..., 1::2]
+
+    # Apply rotation.
+    x_out_real = x_real * freqs_cos - x_imag * freqs_sin
+    x_out_imag = x_real * freqs_sin + x_imag * freqs_cos
+
+    # Reconstruct the output tensor by interleaving the parts.
+    return jnp.stack([x_out_real, x_out_imag], axis=-1).reshape(B, H, L, D)
 
 
 class GQA(nnx.Module):
