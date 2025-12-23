@@ -10,10 +10,10 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from tensorboardX import SummaryWriter
 
-from checkpoint import save_checkpoint
-from config import ModelConfig, TrainConfig
-from data import Batch, dummy_data_generator
-from model import Encoder
+from .checkpoint import save_checkpoint
+from .config import ModelConfig, TrainConfig
+from .data import Batch, dummy_data_generator
+from .model import Encoder
 
 TrainStep = Callable[
     [Encoder, nnx.Optimizer, Batch],
@@ -58,14 +58,10 @@ def create_train_step(mesh: Mesh) -> TrainStep:
         def loss_fn(model: Encoder) -> Tuple[Array, Tuple[Array, Array]]:
             mlm_logits, nsp_logits = model(batch.input_ids, batch.seg_ids)
 
-            mlm_losses = optax.softmax_cross_entropy_with_integer_labels(
-                mlm_logits, batch.mlm_targets
-            )
+            mlm_losses = optax.softmax_cross_entropy_with_integer_labels(mlm_logits, batch.mlm_targets)
             mlm_loss = jnp.sum(mlm_losses * batch.mlm_mask) / (jnp.sum(batch.mlm_mask) + 1e-9)
 
-            nsp_loss = jnp.mean(
-                optax.softmax_cross_entropy_with_integer_labels(nsp_logits, batch.nsp_labels)
-            )
+            nsp_loss = jnp.mean(optax.softmax_cross_entropy_with_integer_labels(nsp_logits, batch.nsp_labels))
             return mlm_loss + nsp_loss, (mlm_loss, nsp_loss)
 
         (loss, (mlm_loss, nsp_loss)), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)
@@ -75,7 +71,7 @@ def create_train_step(mesh: Mesh) -> TrainStep:
     return train_step
 
 
-def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
+def train_loop(model_config: ModelConfig, train_config: TrainConfig):
     """Run the training loop with TensorBoard logging and multi-GPU data parallelism."""
 
     # Set up checkpoint directory

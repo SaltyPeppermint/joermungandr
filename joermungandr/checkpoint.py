@@ -4,7 +4,7 @@ import orbax.checkpoint as ocp
 import sentencepiece as spm
 from flax import nnx
 
-from model import Encoder
+from .model import Encoder
 
 
 def load_tokenizer(path: str) -> spm.SentencePieceProcessor:

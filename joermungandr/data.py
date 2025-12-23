@@ -5,7 +5,7 @@ import jax
 from flax import nnx
 from jax import Array
 
-from config import ModelConfig, TrainConfig
+from .config import ModelConfig, TrainConfig
 
 
 @jax.tree_util.register_pytree_node_class
