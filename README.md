@@ -18,9 +18,10 @@ Negative Sample (Label 0):
 Pick a random sentence S 
 Input: [CLS] S_t [SEP] S_{t+1} [SEP] S_{rand} [SEP]
 
-## Changes from default bert besides 3 sentence Objective
+## Changes from default BERT besides 3 sentence Objective
 
-- RoPE: Not needing to deal with absolute embeddings.
+- RoPE: Not needing to deal with absolute embeddings
 - Pre-Norm + RMSNorm: Standard now I guess
 - No Biases in Linear layers: Saves parameters 
 - GQA: Reduced KV cache overhead, once I implement it. Actually I dont know if this makes sense for an encoder only model
+- SwiGLU: Seems to be better and cheaper
