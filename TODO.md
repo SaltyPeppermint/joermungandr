@@ -1,0 +1,4 @@
+- Data Loading
+- Padding?
+- KV Cache
+- Tokenizer Training

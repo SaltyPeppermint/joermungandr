@@ -1,0 +1,15 @@
+[project]
+name = "toothless-jax"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "==3.13.*"
+dependencies = [
+    "flax>=0.12",
+    "jax>=0.8",
+    "optax>=0.2",
+    "orbax-checkpoint>=0.11.31",
+    "sentencepiece>=0.2.1",
+    "tensorboardX>=2",
+    "tyro>=1.0.3",
+]
