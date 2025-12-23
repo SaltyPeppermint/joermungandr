@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Callable, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -15,11 +14,6 @@ from .config import ModelConfig, TrainConfig
 from .data import Batch, dummy_data_generator
 from .model import Encoder
 
-TrainStep = Callable[
-    [Encoder, nnx.Optimizer, Batch],
-    Tuple[Array, Array, Array, Encoder, nnx.Optimizer],
-]
-
 
 def create_scheduler(config: TrainConfig) -> optax.Schedule:
     """Create a learning rate schedule with linear warmup and cosine decay."""
@@ -33,29 +27,22 @@ def create_scheduler(config: TrainConfig) -> optax.Schedule:
     )
 
 
-def create_train_step(mesh: Mesh) -> TrainStep:
+def create_train_step(mesh: Mesh):
     """Create a JIT-compiled training step with data-parallel sharding."""
     data_sharding = NamedSharding(mesh, P("data"))
 
     @jax.jit
     def train_step(
-        model: Encoder,
-        optimizer: nnx.Optimizer,
-        batch: Batch,
-    ) -> Tuple[Array, Array, Array, Encoder, nnx.Optimizer]:
-        """
-        Execute a single training step with data parallelism.
-
-        Args:
-            batch: A `Batch` object containing training data.
+        model: Encoder, optimizer: nnx.Optimizer, batch: Batch
+    ) -> tuple[Array, Array, Array, Encoder, nnx.Optimizer]:
+        """Execute a single training step with data parallelism.
 
         Returns:
-            Tuple of (total_loss, mlm_loss, nsp_loss), each a scalar, plus the
-            updated model and optimizer.
+            (total_loss, mlm_loss, nsp_loss, model, optimizer)
         """
         batch = jax.device_put(batch, data_sharding)
 
-        def loss_fn(model: Encoder) -> Tuple[Array, Tuple[Array, Array]]:
+        def loss_fn(model: Encoder) -> tuple[Array, tuple[Array, Array]]:
             mlm_logits, nsp_logits = model(
                 batch.input_ids, batch.seg_ids, mask=batch.attention_mask
             )
@@ -78,7 +65,7 @@ def create_train_step(mesh: Mesh) -> TrainStep:
     return train_step
 
 
-def train_loop(model_config: ModelConfig, train_config: TrainConfig):
+def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
     """Run the training loop with TensorBoard logging and multi-GPU data parallelism."""
 
     # Set up checkpoint directory

@@ -141,20 +141,14 @@ class GQA(nnx.Module):
         q = jnp.transpose(q_rope, (0, 2, 1, 3))
         k = jnp.transpose(k_rope, (0, 2, 1, 3))
 
+        # Create 4D attention mask [B, 1, T, S] from padding mask [B, L]
+        if mask is not None:
+            mask = mask[:, None, :, None] & mask[:, None, None, :]
+
         # JAX's dot_product_attention handles GQA natively when K != N
         # No need to manually repeat K/V heads
+        out = jax.nn.dot_product_attention(q, k, v, mask=mask)
 
-        # Create 4D attention mask from 2D padding mask if provided
-        attention_mask_4d = None
-        if mask is not None:
-            # mask is [B, L], we need [B, 1, T, S] to broadcast to [B, N, T, S]
-            # Create [B, L, L] first (query positions x key positions)
-            attention_mask_2d = mask[:, :, None] & mask[:, None, :]  # [B, T, S]
-            # Add head dimension: [B, T, S] -> [B, 1, T, S]
-            attention_mask_4d = attention_mask_2d[:, None, :, :]
-
-        # jax.nn.dot_product_attention expects [B, T, N, H] for query and [B, S, K, H] for key/value
-        out = jax.nn.dot_product_attention(q, k, v, mask=attention_mask_4d)
         return self.o_proj(out.reshape(B, L, -1))
 
 
