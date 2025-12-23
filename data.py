@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import Generator
 
 import jax
-import jax.tree_util
 from flax import nnx
 from jax import Array
 
