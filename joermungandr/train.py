@@ -56,7 +56,9 @@ def create_train_step(mesh: Mesh) -> TrainStep:
         batch = jax.device_put(batch, data_sharding)
 
         def loss_fn(model: Encoder) -> Tuple[Array, Tuple[Array, Array]]:
-            mlm_logits, nsp_logits = model(batch.input_ids, batch.seg_ids)
+            mlm_logits, nsp_logits = model(
+                batch.input_ids, batch.seg_ids, mask=batch.attention_mask
+            )
 
             mlm_losses = optax.softmax_cross_entropy_with_integer_labels(
                 mlm_logits, batch.mlm_targets
@@ -66,6 +68,7 @@ def create_train_step(mesh: Mesh) -> TrainStep:
             nsp_loss = jnp.mean(
                 optax.softmax_cross_entropy_with_integer_labels(nsp_logits, batch.nsp_labels)
             )
+
             return mlm_loss + nsp_loss, (mlm_loss, nsp_loss)
 
         (loss, (mlm_loss, nsp_loss)), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model)

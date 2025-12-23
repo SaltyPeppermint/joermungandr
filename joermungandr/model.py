@@ -118,7 +118,7 @@ class GQA(nnx.Module):
 
         Args:
             x: Input tensor of shape [B, L, D].
-            mask: Optional attention mask of shape [B, 1, L, L] or broadcastable.
+            mask: Optional 2D attention mask of shape [B, L] (padding mask).
 
         Returns:
             Output tensor of shape [B, L, D].
@@ -130,21 +130,31 @@ class GQA(nnx.Module):
         k = self.k_proj(x).reshape(B, L, self.num_kv, self.head_dim)
         v = self.v_proj(x).reshape(B, L, self.num_kv, self.head_dim)
 
-        # Transpose for attention: [B, L, H, head_dim] -> [B, H, L, head_dim]
-        q = jnp.transpose(q, (0, 2, 1, 3))
-        k = jnp.transpose(k, (0, 2, 1, 3))
-        v = jnp.transpose(v, (0, 2, 1, 3))
+        # Transpose for RoPE which expects [B, H, L, D]
+        q_rope = jnp.transpose(q, (0, 2, 1, 3))
+        k_rope = jnp.transpose(k, (0, 2, 1, 3))
 
-        q = apply_rope(q, self.freqs_cis.value)
-        k = apply_rope(k, self.freqs_cis.value)
+        q_rope = apply_rope(q_rope, self.freqs_cis.value)
+        k_rope = apply_rope(k_rope, self.freqs_cis.value)
 
-        # Attention: [B, H, L, head_dim] -> [B, H, L, head_dim]
-        # K and V heads are automatically broadcasted to match the number of query
-        # heads in JAX's dot-product attention, which is what we need for GQA.
-        out = jax.nn.dot_product_attention(q, k, v, mask=mask)
+        # Transpose back to [B, L, H, D] for dot_product_attention
+        q = jnp.transpose(q_rope, (0, 2, 1, 3))
+        k = jnp.transpose(k_rope, (0, 2, 1, 3))
 
-        # Transpose back: [B, H, L, head_dim] -> [B, L, H, head_dim] -> [B, L, D]
-        out = jnp.transpose(out, (0, 2, 1, 3))
+        # JAX's dot_product_attention handles GQA natively when K != N
+        # No need to manually repeat K/V heads
+
+        # Create 4D attention mask from 2D padding mask if provided
+        attention_mask_4d = None
+        if mask is not None:
+            # mask is [B, L], we need [B, 1, T, S] to broadcast to [B, N, T, S]
+            # Create [B, L, L] first (query positions x key positions)
+            attention_mask_2d = mask[:, :, None] & mask[:, None, :]  # [B, T, S]
+            # Add head dimension: [B, T, S] -> [B, 1, T, S]
+            attention_mask_4d = attention_mask_2d[:, None, :, :]
+
+        # jax.nn.dot_product_attention expects [B, T, N, H] for query and [B, S, K, H] for key/value
+        out = jax.nn.dot_product_attention(q, k, v, mask=attention_mask_4d)
         return self.o_proj(out.reshape(B, L, -1))
 
 
@@ -203,7 +213,7 @@ class Encoder(nnx.Module):
         Args:
             input_ids: Token IDs of shape [B, L].
             seg_ids: Segment IDs of shape [B, L].
-            mask: Optional attention mask of shape [B, 1, L, L] or broadcastable.
+            mask: Optional attention mask of shape [B, L] (padding mask).
 
         Returns:
             Tuple of (mlm_logits, nsp_logits):
