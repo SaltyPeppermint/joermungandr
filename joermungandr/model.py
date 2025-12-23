@@ -17,30 +17,15 @@ class SwiGLU(nnx.Module):
         dtype: jnp.dtype = jnp.bfloat16,
         param_dtype: jnp.dtype = jnp.float32,
     ):
-        self.w1 = nnx.Linear(
-            config.dim,
-            config.intermediate_dim,
-            use_bias=False,
-            rngs=rngs,
-            dtype=dtype,
-            param_dtype=param_dtype,
-        )
-        self.w2 = nnx.Linear(
-            config.dim,
-            config.intermediate_dim,
-            use_bias=False,
-            rngs=rngs,
-            dtype=dtype,
-            param_dtype=param_dtype,
-        )
-        self.w3 = nnx.Linear(
-            config.intermediate_dim,
-            config.dim,
-            use_bias=False,
-            rngs=rngs,
-            dtype=dtype,
-            param_dtype=param_dtype,
-        )
+        linear_kwargs = {
+            "use_bias": False,
+            "rngs": rngs,
+            "dtype": dtype,
+            "param_dtype": param_dtype,
+        }
+        self.w1 = nnx.Linear(config.dim, config.intermediate_dim, **linear_kwargs)
+        self.w2 = nnx.Linear(config.dim, config.intermediate_dim, **linear_kwargs)
+        self.w3 = nnx.Linear(config.intermediate_dim, config.dim, **linear_kwargs)
 
     def __call__(self, x: Array) -> Array:
         return self.w3(nnx.silu(self.w1(x)) * self.w2(x))
@@ -111,38 +96,17 @@ class GQA(nnx.Module):
         self.num_kv = config.num_kv_heads
         self.head_dim = config.dim // config.num_heads
 
-        self.q_proj = nnx.Linear(
-            config.dim,
-            config.num_heads * self.head_dim,
-            use_bias=False,
-            rngs=rngs,
-            dtype=dtype,
-            param_dtype=param_dtype,
-        )
-        self.k_proj = nnx.Linear(
-            config.dim,
-            config.num_kv_heads * self.head_dim,
-            use_bias=False,
-            rngs=rngs,
-            dtype=dtype,
-            param_dtype=param_dtype,
-        )
-        self.v_proj = nnx.Linear(
-            config.dim,
-            config.num_kv_heads * self.head_dim,
-            use_bias=False,
-            rngs=rngs,
-            dtype=dtype,
-            param_dtype=param_dtype,
-        )
-        self.o_proj = nnx.Linear(
-            config.num_heads * self.head_dim,
-            config.dim,
-            use_bias=False,
-            rngs=rngs,
-            dtype=dtype,
-            param_dtype=param_dtype,
-        )
+        linear_kwargs = {
+            "use_bias": False,
+            "rngs": rngs,
+            "dtype": dtype,
+            "param_dtype": param_dtype,
+        }
+
+        self.q_proj = nnx.Linear(config.dim, config.num_heads * self.head_dim, **linear_kwargs)
+        self.k_proj = nnx.Linear(config.dim, config.num_kv_heads * self.head_dim, **linear_kwargs)
+        self.v_proj = nnx.Linear(config.dim, config.num_kv_heads * self.head_dim, **linear_kwargs)
+        self.o_proj = nnx.Linear(config.num_heads * self.head_dim, config.dim, **linear_kwargs)
 
         self.freqs_cis = nnx.Cache(
             precompute_freqs_cis(self.head_dim, config.max_len, config.rope_theta)
@@ -195,10 +159,11 @@ class TransformerBlock(nnx.Module):
         dtype: jnp.dtype = jnp.bfloat16,
         param_dtype: jnp.dtype = jnp.float32,
     ):
-        self.norm1 = nnx.RMSNorm(config.dim, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
-        self.attn = GQA(config, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
-        self.norm2 = nnx.RMSNorm(config.dim, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
-        self.mlp = SwiGLU(config, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
+        module_kwargs = {"rngs": rngs, "dtype": dtype, "param_dtype": param_dtype}
+        self.norm1 = nnx.RMSNorm(config.dim, **module_kwargs)
+        self.attn = GQA(config, **module_kwargs)
+        self.norm2 = nnx.RMSNorm(config.dim, **module_kwargs)
+        self.mlp = SwiGLU(config, **module_kwargs)
 
     def __call__(self, x: Array, mask: Array | None = None) -> Array:
         x = x + self.attn(self.norm1(x), mask)
@@ -217,30 +182,17 @@ class Encoder(nnx.Module):
         dtype: jnp.dtype = jnp.bfloat16,
         param_dtype: jnp.dtype = jnp.float32,
     ):
-        self.tok_emb = nnx.Embed(
-            config.vocab_size, config.dim, rngs=rngs, dtype=dtype, param_dtype=param_dtype
-        )
-        self.seg_emb = nnx.Embed(
-            config.num_segments, config.dim, rngs=rngs, dtype=dtype, param_dtype=param_dtype
-        )
+        module_kwargs = {"rngs": rngs, "dtype": dtype, "param_dtype": param_dtype}
+        linear_kwargs = {**module_kwargs, "use_bias": False}
+
+        self.tok_emb = nnx.Embed(config.vocab_size, config.dim, **module_kwargs)
+        self.seg_emb = nnx.Embed(config.num_segments, config.dim, **module_kwargs)
         self.blocks = nnx.List(
-            [
-                TransformerBlock(config, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
-                for _ in range(config.num_layers)
-            ]
+            [TransformerBlock(config, **module_kwargs) for _ in range(config.num_layers)]
         )
-        self.norm_final = nnx.RMSNorm(config.dim, rngs=rngs, dtype=dtype, param_dtype=param_dtype)
-        self.mlm_head = nnx.Linear(
-            config.dim,
-            config.vocab_size,
-            use_bias=False,
-            rngs=rngs,
-            dtype=dtype,
-            param_dtype=param_dtype,
-        )
-        self.nsp_head = nnx.Linear(
-            config.dim, 2, use_bias=False, rngs=rngs, dtype=dtype, param_dtype=param_dtype
-        )
+        self.norm_final = nnx.RMSNorm(config.dim, **module_kwargs)
+        self.mlm_head = nnx.Linear(config.dim, config.vocab_size, **linear_kwargs)
+        self.nsp_head = nnx.Linear(config.dim, 2, **linear_kwargs)
 
     def __call__(
         self, input_ids: Array, seg_ids: Array, mask: Array | None = None
