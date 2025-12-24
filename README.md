@@ -1,27 +1,48 @@
-## Data format
+# Joermungandr
 
-[CLS]	Sent 1	[SEP]	Sent 2	[SEP]	Sent 3	[SEP]
+## Special Tokens
 
-## Attention:
+The tokenizer is trained with SentencePiece. Special token IDs are fixed:
 
-Full bidirectional attention
+| ID  | Token   | Usage                                   |
+|-----|---------|---------------------------------------- |
+| 0   | [PAD]   | Padding                                 |
+| 1   | [UNK]   | Unknown token                           |
+| 2   | [CLS]   | Encoder start token / Decoder BOS       |
+| 3   | [SEP]   | Encoder segment separator / Decoder EOS |
+| 4   | [MASK]  | MLM masking                             |
+| 5+  | content | Regular vocabulary                      |
+
+Train the tokenizer with `scripts/train_tokenizer.sh`.
+
+## Data Format
+
+```
+[CLS] Sent_1 [SEP] Sent_2 [SEP] Sent_3 [SEP]
+```
+
+## Attention
+
+Full bidirectional attention.
 
 ## The "Next Sentence" Objective
 
 For triples, the "Next Sentence Prediction" (NSP) becomes a "Valid Conversation Continuation" check.
-Positive Sample (Label 1):
 
-Input: [CLS] S_t [SEP] S_{t+1} [SEP] S_{t+2} [SEP]
+**Positive sample (label 1):**
+```
+[CLS] S_t [SEP] S_{t+1} [SEP] S_{t+2} [SEP]
+```
 
-Negative Sample (Label 0):
+**Negative sample (label 0):**
+```
+[CLS] S_t [SEP] S_{t+1} [SEP] S_rand [SEP]
+```
 
-Pick a random sentence S 
-Input: [CLS] S_t [SEP] S_{t+1} [SEP] S_{rand} [SEP]
+## Changes from BERT
 
-## Changes from default BERT besides 3 sentence Objective
-
-- RoPE: Not needing to deal with absolute embeddings
-- Pre-Norm + RMSNorm: Standard now I guess
-- No Biases in Linear layers: Saves parameters 
-- GQA: Reduced KV cache overhead, once I implement it. Actually I dont know if this makes sense for an encoder only model
-- SwiGLU: Seems to be better and cheaper
+- **RoPE**: No absolute position embeddings needed
+- **Pre-Norm + RMSNorm**: More stable training
+- **No biases**: Saves parameters
+- **GQA**: Reduced KV cache overhead (TBD if useful for encoder-only)
+- **SwiGLU**: Better and cheaper than GELU FFN

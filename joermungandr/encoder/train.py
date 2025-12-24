@@ -5,18 +5,11 @@ from flax import nnx
 from jax import Array
 from jax.sharding import NamedSharding
 
-from .checkpoint import save_checkpoint
-from .config import ModelConfig, TrainConfig
+from .. import checkpoint as ckpt
+from .. import train_utils
+from ..config import ModelConfig, TrainConfig
 from .data import EncoderBatch, dummy_encoder_generator
 from .model import Encoder
-from .train_utils import (
-    create_optimizer,
-    maybe_save_checkpoint,
-    replicate_on_devices,
-    setup_checkpoint_dir,
-    setup_device_mesh,
-    setup_logging,
-)
 
 
 @nnx.jit(donate_argnames=("model", "optimizer"), static_argnames=("data_sharding",))
@@ -50,10 +43,10 @@ def train_step(
 def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
     """Run the encoder training loop with TensorBoard logging and multi-GPU data parallelism."""
 
-    ckpt_path = setup_checkpoint_dir(train_config)
+    ckpt_path = ckpt.setup_dir(train_config)
 
     # Set up device mesh for data parallelism
-    num_devices, replicated, data_sharding = setup_device_mesh()
+    num_devices, replicated, data_sharding = train_utils.setup_device_mesh()
     global_batch_size = train_config.batch_size_per_device * num_devices
 
     print(f"Running on {num_devices} device(s), global batch size: {global_batch_size}")
@@ -61,12 +54,12 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
     # Initialize model and optimizer
     rngs = nnx.Rngs(train_config.seed)
     model = Encoder(model_config, rngs=rngs)
-    optimizer, scheduler = create_optimizer(model, train_config)
+    optimizer, scheduler = train_utils.create_optimizer(model, train_config)
 
     # Replicate model and optimizer state across devices
-    replicate_on_devices(model, optimizer, replicated)
+    train_utils.replicate_on_devices(model, optimizer, replicated)
 
-    writer = setup_logging(train_config, model_config, num_devices)
+    writer = train_utils.setup_logging(train_config, model_config, num_devices)
 
     # Data generator
     data_generator = dummy_encoder_generator(model_config, train_config, global_batch_size, rngs)
@@ -91,11 +84,11 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
                 f"{step:<6} | {float(loss):.4f}      | {float(mlm):.4f}    | {float(nsp):.4f}     | {current_lr:.6f}"
             )
 
-        maybe_save_checkpoint(model, ckpt_path, step, train_config.save_interval)
+        ckpt.maybe_save(model, ckpt_path, step, train_config.save_interval)
 
     # Save final checkpoint
     if ckpt_path:
-        save_checkpoint(model, ckpt_path, train_config.total_steps)
+        ckpt.save(model, ckpt_path, train_config.total_steps)
         print(f"Saved final checkpoint at step {train_config.total_steps}")
 
     writer.close()

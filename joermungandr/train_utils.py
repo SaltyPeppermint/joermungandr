@@ -1,5 +1,4 @@
 from datetime import datetime
-from pathlib import Path
 
 import jax
 import optax
@@ -8,7 +7,6 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from tensorboardX import SummaryWriter
 
-from .checkpoint import save_checkpoint
 from .config import ModelConfig, TrainConfig
 
 
@@ -68,18 +66,3 @@ def setup_logging(
     writer.add_text("devices", f"{num_devices} device(s)")
     print(f"Logging to {log_dir}")
     return writer
-
-
-def setup_checkpoint_dir(train_config: TrainConfig) -> Path | None:
-    """Set up checkpoint directory."""
-    ckpt_path = train_config.checkpoint_path
-    if ckpt_path:
-        ckpt_path.mkdir(parents=True, exist_ok=True)
-    return ckpt_path
-
-
-def maybe_save_checkpoint(model: nnx.Module, ckpt_path: Path | None, step: int, save_interval: int):
-    """Save checkpoint if at save interval."""
-    if ckpt_path and (step + 1) % save_interval == 0:
-        save_checkpoint(model, ckpt_path, step + 1)
-        print(f"Saved checkpoint at step {step + 1}")

@@ -62,14 +62,21 @@ echo "Starting tokenizer training..."
 mkdir -p "${MODEL_PATH}"
 FULL_PREFIX="${MODEL_PATH}/${MODEL_PREFIX}"
 
-# Special tokens for BERT-style models
+# Special tokens for BERT/seq2seq models
 # We ensure the following ID assignments:
-# [PAD]=0, [UNK]=1, [CLS]=2 (BOS), [SEP]=3 (EOS), [MASK]=4
+#   0: [PAD]  - Padding token
+#   1: [UNK]  - Unknown token (handled by SentencePiece)
+#   2: [CLS]  - Encoder start token / Decoder BOS
+#   3: [SEP]  - Encoder segment separator / Decoder EOS
+#   4: [MASK] - MLM masking token
+#
+# We disable SentencePiece's built-in BOS/EOS (which would be <s>/</s>)
+# and instead define [CLS], [SEP], [MASK] explicitly as user symbols.
 PAD_ID=0
 UNK_ID=1
-BOS_ID=2 # Represents [CLS]
-EOS_ID=3 # Represents [SEP]
-USER_SYMBOLS="[MASK]"
+BOS_ID=-1  # Disable built-in BOS
+EOS_ID=-1  # Disable built-in EOS
+USER_SYMBOLS="[CLS],[SEP],[MASK]"
 
 # Check if spm_train is available
 if ! command -v spm_train &> /dev/null; then
