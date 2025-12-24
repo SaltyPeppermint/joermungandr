@@ -24,9 +24,9 @@ def generate(
     """Generate sequences autoregressively from encoder inputs.
 
     Args:
-        model: The Seq2Seq model to use for generation.
-        encoder_ids: Encoder input token IDs of shape [B, S].
-        encoder_seg_ids: Segment IDs for encoder of shape [B, S].
+        model
+        encoder_ids: [B, S].
+        encoder_seg_ids: [B, S].
         encoder_mask: Optional encoder padding mask of shape [B, S].
         max_new_tokens: Maximum number of tokens to generate.
         temperature: Sampling temperature (higher = more random).
@@ -42,7 +42,6 @@ def generate(
     """
     batch_size = encoder_ids.shape[0]
 
-    # Encode the input sequence once
     encoder_out = model.encode(encoder_ids, encoder_seg_ids, mask=encoder_mask)
 
     # Initialize decoder input with BOS token
@@ -52,30 +51,21 @@ def generate(
     finished = jnp.zeros(batch_size, dtype=jnp.bool_)
 
     for _ in range(max_new_tokens):
-        # Get logits for the current sequence
-        logits = model.decode(
-            decoder_ids,
-            encoder_out,
-            encoder_mask=encoder_mask,
-        )
-
+        logits = model.decode(decoder_ids, encoder_out, encoder_mask=encoder_mask)
         # Get logits for the last token
-        next_token_logits = logits[:, -1, :]  # [B, vocab_size]
+        next_token_logits = logits[:, -1, :]
 
-        # Apply temperature
         if temperature != 1.0:
             next_token_logits = next_token_logits / temperature
 
-        # Sample or take argmax
         if temperature == 0.0:
             # Greedy decoding
             next_token = jnp.argmax(next_token_logits, axis=-1)
         else:
-            # Sampling
             if rngs is None:
                 raise ValueError("rngs must be provided when temperature > 0")
 
-            # Apply top-k filtering
+            # Apply top-k sampling
             if top_k is not None:
                 top_k_logits, top_k_indices = jax.lax.top_k(next_token_logits, top_k)
                 # Set all non-top-k logits to -inf
@@ -122,7 +112,6 @@ def generate(
         # Update finished status
         finished = finished | (next_token == eos_id)
 
-        # Early stopping if all sequences are finished
         if jnp.all(finished):
             break
 
@@ -152,9 +141,9 @@ def generate_batch(
     different sequences for each replica.
 
     Args:
-        model: The Seq2Seq model to use for generation.
-        encoder_ids: Encoder input token IDs of shape [B, S].
-        encoder_seg_ids: Segment IDs for encoder of shape [B, S].
+        model
+        encoder_ids: [B, S].
+        encoder_seg_ids: [B, S].
         encoder_mask: Optional encoder padding mask of shape [B, S].
         max_new_tokens: Maximum number of tokens to generate.
         temperature: Sampling temperature (higher = more random).

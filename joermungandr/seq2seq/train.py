@@ -49,23 +49,19 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
 
     ckpt_path = ckpt.setup_dir(train_config)
 
-    # Set up device mesh for data parallelism
     num_devices, replicated, data_sharding = train_utils.setup_device_mesh()
     global_batch_size = train_config.batch_size_per_device * num_devices
 
     print(f"Running on {num_devices} device(s), global batch size: {global_batch_size}")
 
-    # Initialize model and optimizer
     rngs = nnx.Rngs(train_config.seed)
     model = Seq2Seq(model_config, rngs=rngs)
     optimizer, scheduler = train_utils.create_optimizer(model, train_config)
 
-    # Replicate model and optimizer state across devices
     train_utils.replicate_on_devices(model, optimizer, replicated)
 
     writer = train_utils.setup_logging(train_config, model_config, num_devices)
 
-    # Data generator
     data_generator = dummy_seq2seq_generator(model_config, train_config, global_batch_size, rngs)
 
     print("Starting training...")
@@ -85,7 +81,6 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
 
         ckpt.maybe_save(model, ckpt_path, step, train_config.save_interval)
 
-    # Save final checkpoint
     if ckpt_path:
         ckpt.save(model, ckpt_path, train_config.total_steps)
         print(f"Saved final checkpoint at step {train_config.total_steps}")

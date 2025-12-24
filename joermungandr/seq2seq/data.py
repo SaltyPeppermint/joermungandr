@@ -14,11 +14,11 @@ class Seq2SeqBatch:
     """A batch of data for seq2seq training.
 
     Attributes:
-        encoder_ids: [B, S] encoder input token IDs.
-        encoder_seg_ids: [B, S] segment IDs for encoder.
-        encoder_mask: [B, S] boolean mask for encoder attention.
-        decoder_ids: [B, T] decoder input token IDs (shifted right).
-        decoder_mask: [B, T] boolean mask for decoder attention.
+        encoder_ids: [B, S]
+        encoder_seg_ids: [B, S]
+        encoder_mask: [B, S]
+        decoder_ids: [B, T]
+        decoder_mask: [B, T]
         labels: [B, T] target token IDs for next-token prediction.
         label_mask: [B, T] boolean mask for loss computation.
     """
@@ -62,9 +62,8 @@ def dummy_seq2seq_generator(
             rngs.step(), (global_batch_size,), 1, jnp.maximum(remaining, 1) + 1
         )
 
-        encoder_total_lens = 1 + seg_a_lens + 1 + seg_b_lens + 1  # [CLS] A [SEP] B [SEP]
+        encoder_total_lens = 1 + seg_a_lens + 1 + seg_b_lens + 1
 
-        # Generate random content tokens
         encoder_content = jax.random.randint(
             rngs.step(), (global_batch_size, seq_len), first_content_id, model_config.vocab_size
         )
@@ -99,7 +98,6 @@ def dummy_seq2seq_generator(
             rngs.step(), (global_batch_size,), 1, max_decoder_content + 1
         )
 
-        # Generate decoder content tokens
         decoder_content = jax.random.randint(
             rngs.step(), (global_batch_size, seq_len), first_content_id, model_config.vocab_size
         )
