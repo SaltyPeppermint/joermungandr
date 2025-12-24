@@ -65,18 +65,18 @@ FULL_PREFIX="${MODEL_PATH}/${MODEL_PREFIX}"
 # Special tokens for BERT/seq2seq models
 # We ensure the following ID assignments:
 #   0: [PAD]  - Padding token
-#   1: [UNK]  - Unknown token (handled by SentencePiece)
-#   2: [CLS]  - Encoder start token / Decoder BOS
-#   3: [SEP]  - Encoder segment separator / Decoder EOS
+#   1: [UNK]  - Unknown token
+#   2: [BOS]  - Used as [CLS] for encoder / BOS for decoder
+#   3: [EOS]  - Used as [SEP] for encoder / EOS for decoder
 #   4: [MASK] - MLM masking token
 #
-# We disable SentencePiece's built-in BOS/EOS (which would be <s>/</s>)
-# and instead define [CLS], [SEP], [MASK] explicitly as user symbols.
+# SentencePiece will create <s> and </s> at positions 2 and 3.
+# We treat them as [CLS] and [SEP] in the code.
 PAD_ID=0
 UNK_ID=1
-BOS_ID=-1  # Disable built-in BOS
-EOS_ID=-1  # Disable built-in EOS
-USER_SYMBOLS="[CLS],[SEP],[MASK]"
+BOS_ID=2
+EOS_ID=3
+USER_SYMBOLS="[MASK]"
 
 # Check if spm_train is available
 if ! command -v spm_train &> /dev/null; then

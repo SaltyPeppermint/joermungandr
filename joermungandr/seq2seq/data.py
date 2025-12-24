@@ -46,8 +46,8 @@ def dummy_seq2seq_generator(
     """
     # Special token IDs
     pad_id = 0
-    cls_id = 2  # Also used as decoder BOS
-    sep_id = 3  # Also used as decoder EOS
+    cls_id = 2  # Also used as decoder BOS. Corresponds to BOS in tokenizer
+    sep_id = 3  # Also used as decoder EOS. Corresponds to EOS in tokenizer
     first_content_id = 5  # First non-special token ID
 
     seq_len = train_config.seq_len

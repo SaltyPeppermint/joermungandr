@@ -42,8 +42,8 @@ def dummy_encoder_generator(
     """
     # Special token IDs
     pad_id = 0
-    cls_id = 2
-    sep_id = 3
+    cls_id = 2  # Corresponds to BOS in tokenizer
+    sep_id = 3  # Corresponds to EOS in tokenizer
     first_content_id = 5  # First non-special token ID
 
     seq_len = train_config.seq_len
