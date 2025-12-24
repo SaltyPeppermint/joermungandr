@@ -1,35 +1,27 @@
-from datetime import datetime
-
 import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
 from jax import Array
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
-from tensorboardX import SummaryWriter
+from jax.sharding import NamedSharding
 
 from .checkpoint import save_checkpoint
 from .config import ModelConfig, TrainConfig
-from .data import Batch, dummy_data_generator
+from .data import EncoderBatch, dummy_encoder_generator
 from .model import Encoder
-
-
-def create_scheduler(config: TrainConfig) -> optax.Schedule:
-    """Create a learning rate schedule with linear warmup and cosine decay."""
-    warmup_steps = int(config.total_steps * config.warmup_ratio)
-    return optax.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=config.lr,
-        warmup_steps=warmup_steps,
-        decay_steps=config.total_steps - warmup_steps,
-        end_value=0.0,
-    )
+from .train_utils import (
+    create_optimizer,
+    maybe_save_checkpoint,
+    replicate_on_devices,
+    setup_checkpoint_dir,
+    setup_device_mesh,
+    setup_logging,
+)
 
 
 @nnx.jit(donate_argnames=("model", "optimizer"), static_argnames=("data_sharding",))
 def train_step(
-    model: Encoder, optimizer: nnx.Optimizer, batch: Batch, data_sharding: NamedSharding
+    model: Encoder, optimizer: nnx.Optimizer, batch: EncoderBatch, data_sharding: NamedSharding
 ) -> tuple[Array, Array, Array, Encoder, nnx.Optimizer]:
     """Execute a single training step with data parallelism.
 
@@ -56,17 +48,12 @@ def train_step(
 
 
 def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
-    """Run the training loop with TensorBoard logging and multi-GPU data parallelism."""
+    """Run the encoder training loop with TensorBoard logging and multi-GPU data parallelism."""
 
-    # Set up checkpoint directory
-    ckpt_path = train_config.checkpoint_path
-    if ckpt_path:
-        ckpt_path.mkdir(parents=True, exist_ok=True)
+    ckpt_path = setup_checkpoint_dir(train_config)
 
     # Set up device mesh for data parallelism
-    devices = jax.devices()
-    num_devices = len(devices)
-    mesh = Mesh(devices, axis_names=("data",))
+    num_devices, replicated, data_sharding = setup_device_mesh()
     global_batch_size = train_config.batch_size_per_device * num_devices
 
     print(f"Running on {num_devices} device(s), global batch size: {global_batch_size}")
@@ -74,30 +61,16 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
     # Initialize model and optimizer
     rngs = nnx.Rngs(train_config.seed)
     model = Encoder(model_config, rngs=rngs)
-
-    scheduler = create_scheduler(train_config)
-    tx = optax.chain(
-        optax.clip_by_global_norm(train_config.max_grad_norm),
-        optax.adamw(learning_rate=scheduler, weight_decay=train_config.weight_decay),
-    )
-    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    optimizer, scheduler = create_optimizer(model, train_config)
 
     # Replicate model and optimizer state across devices
-    replicated = NamedSharding(mesh, P())
-    nnx.update(model, jax.device_put(nnx.state(model), replicated))
-    nnx.update(optimizer, jax.device_put(nnx.state(optimizer), replicated))
+    replicate_on_devices(model, optimizer, replicated)
 
-    log_dir = train_config.log_dir or f"runs/{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    writer = SummaryWriter(log_dir)
-    writer.add_text("model_config", str(model_config))
-    writer.add_text("train_config", str(train_config))
-    writer.add_text("devices", f"{num_devices} device(s)")
+    writer = setup_logging(train_config, model_config, num_devices)
 
-    # Sharding data accross devices
-    data_sharding = NamedSharding(mesh, P("data"))
-    data_generator = dummy_data_generator(model_config, train_config, global_batch_size, rngs)
+    # Data generator
+    data_generator = dummy_encoder_generator(model_config, train_config, global_batch_size, rngs)
 
-    print(f"Logging to {log_dir}")
     print("Starting training...")
     print(f"{'Step':<6} | {'Total Loss':<12} | {'MLM Loss':<10} | {'NSP Loss':<10} | {'LR':<10}")
     print("-" * 60)
@@ -118,9 +91,7 @@ def train_loop(model_config: ModelConfig, train_config: TrainConfig) -> None:
                 f"{step:<6} | {float(loss):.4f}      | {float(mlm):.4f}    | {float(nsp):.4f}     | {current_lr:.6f}"
             )
 
-        if ckpt_path and (step + 1) % train_config.save_interval == 0:
-            save_checkpoint(model, ckpt_path, step + 1)
-            print(f"Saved checkpoint at step {step + 1}")
+        maybe_save_checkpoint(model, ckpt_path, step, train_config.save_interval)
 
     # Save final checkpoint
     if ckpt_path:

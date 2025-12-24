@@ -82,19 +82,26 @@ def apply_rope(x: Array, freqs_cis: Array) -> Array:
 
 
 class GQA(nnx.Module):
-    """Grouped-query attention with rotary position (RoPE) embeddings."""
+    """Grouped-query attention with rotary position (RoPE) embeddings.
+
+    Supports both self-attention and cross-attention modes.
+    """
 
     def __init__(
         self,
         config: ModelConfig,
         rngs: nnx.Rngs,
         *,
+        is_cross_attention: bool = False,
+        is_causal: bool = False,
         dtype: jnp.dtype = jnp.bfloat16,
         param_dtype: jnp.dtype = jnp.float32,
     ):
         self.num_heads = config.num_heads
         self.num_kv = config.num_kv_heads
         self.head_dim = config.dim // config.num_heads
+        self.is_cross_attention = is_cross_attention
+        self.is_causal = is_causal
 
         linear_kwargs = {
             "use_bias": False,
@@ -112,40 +119,53 @@ class GQA(nnx.Module):
             precompute_freqs_cis(self.head_dim, config.max_len, config.rope_theta)
         )
 
-    def __call__(self, x: Array, *, mask: Array | None = None) -> Array:
+    def __call__(
+        self,
+        x: Array,
+        *,
+        kv: Array | None = None,
+        mask: Array | None = None,
+    ) -> Array:
         """
         Apply grouped-query attention.
 
         Args:
-            x: Input tensor of shape [B, L, D].
-            mask: Optional 2D attention mask of shape [B, L] (padding mask).
+            x: Input tensor of shape [B, L, D] (queries).
+            kv: Optional key-value tensor of shape [B, S, D] for cross-attention.
+                If None, self-attention is performed.
+            mask: Optional padding mask of shape [B, S] for key/value positions.
 
         Returns:
             Output tensor of shape [B, L, D].
         """
         B, L, _ = x.shape
+        kv_input = kv if kv is not None else x
+        S = kv_input.shape[1]
 
-        # Project and reshape: [B, L, D] -> [B, L, H, head_dim]
+        # Project and reshape
         q = self.q_proj(x).reshape(B, L, self.num_heads, self.head_dim)
-        k = self.k_proj(x).reshape(B, L, self.num_kv, self.head_dim)
-        v = self.v_proj(x).reshape(B, L, self.num_kv, self.head_dim)
+        k = self.k_proj(kv_input).reshape(B, S, self.num_kv, self.head_dim)
+        v = self.v_proj(kv_input).reshape(B, S, self.num_kv, self.head_dim)
 
-        # Apply RoPE
-        q = apply_rope(q, self.freqs_cis.value)
-        k = apply_rope(k, self.freqs_cis.value)
+        # Apply RoPE (only for self-attention, not cross-attention)
+        if not self.is_cross_attention:
+            q = apply_rope(q, self.freqs_cis.value)
+            k = apply_rope(k, self.freqs_cis.value)
 
-        # Create 4D attention mask [B, 1, T, S] from padding mask [B, L]
+        # Build attention mask [B, 1, L, S]
+        attn_mask = None
+        if self.is_causal:
+            attn_mask = jnp.tril(jnp.ones((L, S), dtype=jnp.bool_))
         if mask is not None:
-            mask = mask[:, None, :, None] & mask[:, None, None, :]
+            pad_mask = mask[:, None, None, :]  # [B, 1, 1, S]
+            attn_mask = pad_mask if attn_mask is None else (attn_mask & pad_mask)
 
-        # JAX's dot_product_attention handles GQA natively when K != N
-        # No need to manually repeat K/V heads
-        out = jax.nn.dot_product_attention(q, k, v, mask=mask)
+        out = jax.nn.dot_product_attention(q, k, v, mask=attn_mask)
 
         return self.o_proj(out.reshape(B, L, -1))
 
 
-class TransformerBlock(nnx.Module):
+class EncoderBlock(nnx.Module):
     """Pre-norm transformer block with GQA attention and SwiGLU MLP."""
 
     def __init__(
@@ -168,6 +188,46 @@ class TransformerBlock(nnx.Module):
         return x
 
 
+class DecoderBlock(nnx.Module):
+    """Pre-norm decoder block with self-attention, cross-attention, and SwiGLU MLP."""
+
+    def __init__(
+        self,
+        config: ModelConfig,
+        rngs: nnx.Rngs,
+        *,
+        dtype: jnp.dtype = jnp.bfloat16,
+        param_dtype: jnp.dtype = jnp.float32,
+    ):
+        module_kwargs = {"rngs": rngs, "dtype": dtype, "param_dtype": param_dtype}
+        self.norm1 = nnx.RMSNorm(config.dim, **module_kwargs)
+        self.self_attn = GQA(config, is_causal=True, **module_kwargs)
+        self.norm2 = nnx.RMSNorm(config.dim, **module_kwargs)
+        self.cross_attn = GQA(config, is_cross_attention=True, **module_kwargs)
+        self.norm3 = nnx.RMSNorm(config.dim, **module_kwargs)
+        self.mlp = SwiGLU(config, **module_kwargs)
+
+    def __call__(
+        self,
+        x: Array,
+        encoder_out: Array,
+        *,
+        decoder_mask: Array | None = None,
+        encoder_mask: Array | None = None,
+    ) -> Array:
+        """
+        Args:
+            x: Decoder input of shape [B, T, D].
+            encoder_out: Encoder output of shape [B, S, D].
+            decoder_mask: Padding mask for decoder [B, T].
+            encoder_mask: Padding mask for encoder output [B, S].
+        """
+        x = x + self.self_attn(self.norm1(x), mask=decoder_mask)
+        x = x + self.cross_attn(self.norm2(x), kv=encoder_out, mask=encoder_mask)
+        x = x + self.mlp(self.norm3(x))
+        return x
+
+
 class Encoder(nnx.Module):
     """BERT-style encoder with MLM and NSP heads."""
 
@@ -185,7 +245,7 @@ class Encoder(nnx.Module):
         self.tok_emb = nnx.Embed(config.vocab_size, config.dim, **module_kwargs)
         self.seg_emb = nnx.Embed(config.num_segments, config.dim, **module_kwargs)
         self.blocks = nnx.List(
-            [TransformerBlock(config, **module_kwargs) for _ in range(config.num_layers)]
+            [EncoderBlock(config, **module_kwargs) for _ in range(config.num_layers)]
         )
         self.norm_final = nnx.RMSNorm(config.dim, **module_kwargs)
         self.mlm_head = nnx.Linear(config.dim, config.vocab_size, **linear_kwargs)
@@ -217,3 +277,125 @@ class Encoder(nnx.Module):
         # Use first token (CLS) for sentence-level classification
         nsp_logits = self.nsp_head(x[:, 0, :])
         return mlm_logits, nsp_logits
+
+
+class Seq2Seq(nnx.Module):
+    """seq2seq transformer for sequence-to-sequence tasks.
+
+    The encoder takes two sentences separated by a SEP token and produces
+    contextualized representations. The decoder autoregressively generates
+    the output sequence.
+    """
+
+    def __init__(
+        self,
+        config: ModelConfig,
+        rngs: nnx.Rngs,
+        *,
+        dtype: jnp.dtype = jnp.bfloat16,
+        param_dtype: jnp.dtype = jnp.float32,
+    ):
+        module_kwargs = {"rngs": rngs, "dtype": dtype, "param_dtype": param_dtype}
+        linear_kwargs = {**module_kwargs, "use_bias": False}
+
+        # Shared embeddings for encoder and decoder
+        self.tok_emb = nnx.Embed(config.vocab_size, config.dim, **module_kwargs)
+        self.seg_emb = nnx.Embed(config.num_segments, config.dim, **module_kwargs)
+
+        # Encoder
+        self.encoder_blocks = nnx.List(
+            [EncoderBlock(config, **module_kwargs) for _ in range(config.num_layers)]
+        )
+        self.encoder_norm = nnx.RMSNorm(config.dim, **module_kwargs)
+
+        # Decoder
+        self.decoder_blocks = nnx.List(
+            [DecoderBlock(config, **module_kwargs) for _ in range(config.num_layers)]
+        )
+        self.decoder_norm = nnx.RMSNorm(config.dim, **module_kwargs)
+
+        # Output projection (tied with embeddings via transpose)
+        self.lm_head = nnx.Linear(config.dim, config.vocab_size, **linear_kwargs)
+
+    def encode(
+        self,
+        input_ids: Array,
+        seg_ids: Array,
+        *,
+        mask: Array | None = None,
+    ) -> Array:
+        """
+        Encode the input sequence (two sentences separated by SEP).
+
+        Args:
+            input_ids: Token IDs of shape [B, S].
+            seg_ids: Segment IDs of shape [B, S] (0 for first sentence, 1 for second).
+            mask: Optional padding mask of shape [B, S].
+
+        Returns:
+            Encoder output of shape [B, S, D].
+        """
+        x = self.tok_emb(input_ids) + self.seg_emb(seg_ids)
+
+        for block in self.encoder_blocks:
+            x = block(x, mask)
+
+        return self.encoder_norm(x)
+
+    def decode(
+        self,
+        decoder_ids: Array,
+        encoder_out: Array,
+        *,
+        decoder_mask: Array | None = None,
+        encoder_mask: Array | None = None,
+    ) -> Array:
+        """
+        Decode autoregressively given encoder output.
+
+        Args:
+            decoder_ids: Decoder input token IDs of shape [B, T].
+            encoder_out: Encoder output of shape [B, S, D].
+            decoder_mask: Optional decoder padding mask of shape [B, T].
+            encoder_mask: Optional encoder padding mask of shape [B, S].
+
+        Returns:
+            Logits of shape [B, T, vocab_size].
+        """
+        x = self.tok_emb(decoder_ids)
+
+        for block in self.decoder_blocks:
+            x = block(x, encoder_out, decoder_mask=decoder_mask, encoder_mask=encoder_mask)
+
+        x = self.decoder_norm(x)
+        return self.lm_head(x)
+
+    def __call__(
+        self,
+        encoder_ids: Array,
+        encoder_seg_ids: Array,
+        decoder_ids: Array,
+        *,
+        encoder_mask: Array | None = None,
+        decoder_mask: Array | None = None,
+    ) -> Array:
+        """
+        Full forward pass for training.
+
+        Args:
+            encoder_ids: Encoder input tokens [B, S] (sent1 + SEP + sent2).
+            encoder_seg_ids: Segment IDs [B, S] (0 for sent1, 1 for sent2).
+            decoder_ids: Decoder input tokens [B, T] (target sequence with BOS).
+            encoder_mask: Optional encoder padding mask [B, S].
+            decoder_mask: Optional decoder padding mask [B, T].
+
+        Returns:
+            Logits of shape [B, T, vocab_size].
+        """
+        encoder_out = self.encode(encoder_ids, encoder_seg_ids, mask=encoder_mask)
+        return self.decode(
+            decoder_ids,
+            encoder_out,
+            decoder_mask=decoder_mask,
+            encoder_mask=encoder_mask,
+        )
