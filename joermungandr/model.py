@@ -112,7 +112,7 @@ class GQA(nnx.Module):
             precompute_freqs_cis(self.head_dim, config.max_len, config.rope_theta)
         )
 
-    def __call__(self, x: Array, mask: Array | None = None) -> Array:
+    def __call__(self, x: Array, *, mask: Array | None = None) -> Array:
         """
         Apply grouped-query attention.
 
@@ -163,7 +163,7 @@ class TransformerBlock(nnx.Module):
         self.mlp = SwiGLU(config, **module_kwargs)
 
     def __call__(self, x: Array, mask: Array | None = None) -> Array:
-        x = x + self.attn(self.norm1(x), mask)
+        x = x + self.attn(self.norm1(x), mask=mask)
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -192,7 +192,7 @@ class Encoder(nnx.Module):
         self.nsp_head = nnx.Linear(config.dim, 2, **linear_kwargs)
 
     def __call__(
-        self, input_ids: Array, seg_ids: Array, mask: Array | None = None
+        self, input_ids: Array, seg_ids: Array, *, mask: Array | None = None
     ) -> tuple[Array, Array]:
         """
         Forward pass through the encoder.
