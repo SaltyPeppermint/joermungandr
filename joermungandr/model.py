@@ -54,20 +54,20 @@ def apply_rope(x: Array, freqs_cis: Array) -> Array:
     Apply rotary position embeddings.
 
     Args:
-        x: Input tensor of shape [B, H, L, D].
+        x: Input tensor of shape [B, L, H, D].
         freqs_cis: Precomputed frequencies of shape [max_len, D//2].
 
     Returns:
-        Tensor of shape [B, H, L, D] with rotary embeddings applied.
+        Tensor of shape [B, L, H, D] with rotary embeddings applied.
     """
-    B, H, L, D = x.shape
+    B, L, H, D = x.shape
     # Cast freqs to the input dtype for mixed-precision training.
     freqs_cos = jnp.real(freqs_cis).astype(x.dtype)
     freqs_sin = jnp.imag(freqs_cis).astype(x.dtype)
 
-    # Broadcast freqs: [L, D//2] -> [1, 1, L, D//2]
-    freqs_cos = freqs_cos[None, None, :L, :]
-    freqs_sin = freqs_sin[None, None, :L, :]
+    # Broadcast freqs: [L, D//2] -> [1, L, 1, D//2]
+    freqs_cos = freqs_cos[None, :L, None, :]
+    freqs_sin = freqs_sin[None, :L, None, :]
 
     # Split input into real and imaginary parts.
     x_real = x[..., 0::2]
@@ -78,7 +78,7 @@ def apply_rope(x: Array, freqs_cis: Array) -> Array:
     x_out_imag = x_real * freqs_sin + x_imag * freqs_cos
 
     # Reconstruct the output tensor by interleaving the parts.
-    return jnp.stack([x_out_real, x_out_imag], axis=-1).reshape(B, H, L, D)
+    return jnp.stack([x_out_real, x_out_imag], axis=-1).reshape(B, L, H, D)
 
 
 class GQA(nnx.Module):
@@ -130,16 +130,9 @@ class GQA(nnx.Module):
         k = self.k_proj(x).reshape(B, L, self.num_kv, self.head_dim)
         v = self.v_proj(x).reshape(B, L, self.num_kv, self.head_dim)
 
-        # Transpose for RoPE which expects [B, H, L, D]
-        q_rope = jnp.transpose(q, (0, 2, 1, 3))
-        k_rope = jnp.transpose(k, (0, 2, 1, 3))
-
-        q_rope = apply_rope(q_rope, self.freqs_cis.value)
-        k_rope = apply_rope(k_rope, self.freqs_cis.value)
-
-        # Transpose back to [B, L, H, D] for dot_product_attention
-        q = jnp.transpose(q_rope, (0, 2, 1, 3))
-        k = jnp.transpose(k_rope, (0, 2, 1, 3))
+        # Apply RoPE
+        q = apply_rope(q, self.freqs_cis.value)
+        k = apply_rope(k, self.freqs_cis.value)
 
         # Create 4D attention mask [B, 1, T, S] from padding mask [B, L]
         if mask is not None:
