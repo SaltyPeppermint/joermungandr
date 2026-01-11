@@ -2,7 +2,6 @@ import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, final
 
 import torch
 from torch.utils.data import Dataset
@@ -37,34 +36,6 @@ DEFAULT_INSTRUCTION = (
 )
 
 
-def format_reranker_input(
-    start: str,
-    goal: str,
-    guide: str,
-    instruction: str | None = None,
-) -> str:
-    """Format (start, goal, guide) triple for reranker scoring.
-
-    Maps to reranker's expected format:
-    - Query: "Start: {start} Goal: {goal}"
-    - Document: "{guide}"
-
-    Args:
-        start: Start state/sentence.
-        goal: Goal state/sentence.
-        guide: Guide/middle sentence.
-        instruction: Optional custom instruction.
-
-    Returns:
-        Formatted string for the reranker.
-    """
-    if instruction is None:
-        instruction = DEFAULT_INSTRUCTION
-
-    query = f"Start: {start} Goal: {goal}"
-    return f"<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {guide}"
-
-
 def format_messages(
     start: str,
     goal: str,
@@ -82,7 +53,12 @@ def format_messages(
     Returns:
         List of message dicts for chat template.
     """
-    user_content = format_reranker_input(start, goal, guide, instruction)
+
+    if instruction is None:
+        instruction = DEFAULT_INSTRUCTION
+
+    query = f"Start: {start} Goal: {goal}"
+    user_content = f"<Instruct>: {instruction}\n<Query>: {query}\n<Document>: {guide}"
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
@@ -103,13 +79,12 @@ def load_jsonl(path: str | Path) -> Iterator[RerankerExample]:
     """
     with open(path) as f:
         for line in f:
-            data: dict[str, Any] = json.loads(line)
+            data = json.loads(line)
             yield RerankerExample(
                 start=data["start"], goal=data["goal"], guide=data["guide"], label=data["label"]
             )
 
 
-@final
 class RerankerDataset(Dataset[dict[str, torch.Tensor]]):
     """PyTorch Dataset for reranker fine-tuning."""
 
@@ -158,9 +133,7 @@ class RerankerDataset(Dataset[dict[str, torch.Tensor]]):
         text = text + self.suffix
 
         # Tokenize
-        encoded = self.tokenizer(
-            text, truncation=True, max_length=self.max_length, padding=False, return_tensors=None
-        )
+        encoded = self.tokenizer(text, truncation=True, max_length=self.max_length, padding=False)
 
         return {
             "input_ids": torch.tensor(encoded["input_ids"], dtype=torch.long),
@@ -169,25 +142,25 @@ class RerankerDataset(Dataset[dict[str, torch.Tensor]]):
         }
 
 
-def load_reranker_dataset(
-    path: str | Path,
-    tokenizer: PreTrainedTokenizer,
-    max_length: int = 8192,
-    instruction: str | None = None,
-) -> RerankerDataset:
-    """Load a RerankerDataset from a JSONL file.
+# def load_reranker_dataset(
+#     path: str | Path,
+#     tokenizer: PreTrainedTokenizer,
+#     max_length: int = 8192,
+#     instruction: str | None = None,
+# ) -> RerankerDataset:
+#     """Load a RerankerDataset from a JSONL file.
 
-    Args:
-        path: Path to the JSONL file.
-        tokenizer: HuggingFace tokenizer.
-        max_length: Maximum sequence length.
-        instruction: Optional custom instruction.
+#     Args:
+#         path: Path to the JSONL file.
+#         tokenizer: HuggingFace tokenizer.
+#         max_length: Maximum sequence length.
+#         instruction: Optional custom instruction.
 
-    Returns:
-        RerankerDataset instance.
-    """
-    examples = list(load_jsonl(path))
-    return RerankerDataset(examples, tokenizer, max_length, instruction)
+#     Returns:
+#         RerankerDataset instance.
+#     """
+#     examples = list(load_jsonl(path))
+#     return RerankerDataset(examples, tokenizer, max_length, instruction)
 
 
 def collate_reranker_batch(
