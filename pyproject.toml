@@ -12,4 +12,10 @@ dependencies = [
     "sentencepiece>=0.2.1",
     "tensorboardX>=2",
     "tyro>=1.0.3",
+    # Pretrained Qwen-3 reranker dependencies
+    "transformers>=4.51.0",
+    "huggingface-hub>=0.20",
+    "peft>=0.7",
+    "torch>=2.0",
+    "accelerate>=0.25",
 ]
