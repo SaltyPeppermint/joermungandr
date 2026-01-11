@@ -61,7 +61,7 @@ class Qwen3Reranker:
         # Suffix for the assistant turn
         self.suffix = "<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
-        # Move model to appropriate device
+        # Move model to appropriate device and set to eval mode
         self.device = next(self.model.parameters()).device
 
     def _prepare_input(

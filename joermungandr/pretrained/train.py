@@ -154,6 +154,11 @@ def train_reranker(model_config: RerankerConfig, train_config: RerankerTrainConf
     if train_config.train_data_path is None:
         raise ValueError("train_data_path must be specified")
 
+    # Set random seeds for reproducibility
+    torch.manual_seed(train_config.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(train_config.seed)
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -181,11 +186,10 @@ def train_reranker(model_config: RerankerConfig, train_config: RerankerTrainConf
     eval_dataset = None
     if train_config.eval_data_path:
         print(f"Loading eval data: {train_config.eval_data_path}")
-        eval_samples = list(load_jsonl(train_config.train_data_path))
+        eval_samples = list(load_jsonl(train_config.eval_data_path))
         eval_dataset = RerankerDataset(eval_samples, tokenizer, model_config.max_length)
         print(f"Eval examples: {len(eval_dataset)}")
 
-    # pad_token_id is int for standard tokenizers
     pad_token_id = tokenizer.pad_token_id
     assert isinstance(pad_token_id, int), "Expected int pad_token_id"
     collate_fn = functools.partial(collate_reranker_batch, pad_token_id=pad_token_id)
@@ -200,7 +204,9 @@ def train_reranker(model_config: RerankerConfig, train_config: RerankerTrainConf
             eval_dataset, batch_size=train_config.batch_size, shuffle=False, collate_fn=collate_fn
         )
 
-    num_training_steps = len(train_loader) * train_config.num_epochs
+    num_training_steps = (
+        len(train_loader) // train_config.gradient_accumulation_steps
+    ) * train_config.num_epochs
     optimizer, scheduler = create_optimizer_and_scheduler(
         model,
         lr=train_config.lr,
@@ -222,52 +228,61 @@ def train_reranker(model_config: RerankerConfig, train_config: RerankerTrainConf
     print("-" * 50)
 
     global_step = 0
+    accum_steps = train_config.gradient_accumulation_steps
     model.train()
 
     for epoch in range(train_config.num_epochs):
-        for batch in train_loader:
+        for batch_idx, batch in enumerate(train_loader):
             batch = {k: v.to(device) for k, v in batch.items()}
 
             loss, preds = forward_and_loss(model, batch, token_yes_id, token_no_id)
-
+            loss = loss / accum_steps  # Scale loss for accumulation
             loss.backward()
 
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.max_grad_norm)
+            # Only step optimizer after accumulating gradients
+            if (batch_idx + 1) % accum_steps == 0:
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), train_config.max_grad_norm)
 
-            optimizer.step()
-            optimizer.zero_grad()
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
 
-            global_step += 1
-            current_lr = scheduler.get_last_lr()[0]
-            acc = (preds == batch["labels"]).float().mean().item()
+                global_step += 1
 
-            if writer:
-                writer.add_scalar("train/loss", loss.item(), global_step)
-                writer.add_scalar("train/accuracy", acc, global_step)
-                writer.add_scalar("train/lr", current_lr, global_step)
-                writer.add_scalar("train/epoch", epoch, global_step)
-
-            if global_step % train_config.log_interval == 0:
-                print(
-                    f"{global_step:<8} | {loss.item():<12.4f} | {current_lr:<12.6f} | {acc:<8.4f}"
-                )
-
-            if eval_loader and global_step % train_config.eval_interval == 0:
-                metrics = evaluate(model, eval_loader, token_yes_id, token_no_id, device)
-                print(f"  [Eval] Loss: {metrics['loss']:.4f}, Accuracy: {metrics['accuracy']:.4f}")
+                current_lr = scheduler.get_last_lr()[0]
+                # Use unscaled loss for logging (multiply back by accum_steps)
+                unscaled_loss = loss.item() * accum_steps
+                acc = (preds == batch["labels"]).float().mean().item()
 
                 if writer:
-                    writer.add_scalar("eval/loss", metrics["loss"], global_step)
-                    writer.add_scalar("eval/accuracy", metrics["accuracy"], global_step)
+                    writer.add_scalar("train/loss", unscaled_loss, global_step)
+                    writer.add_scalar("train/accuracy", acc, global_step)
+                    writer.add_scalar("train/lr", current_lr, global_step)
+                    writer.add_scalar("train/epoch", epoch, global_step)
 
-                model.train()
+                if global_step % train_config.log_interval == 0:
+                    print(
+                        f"{global_step:<8} | {unscaled_loss:<12.4f} | {current_lr:<12.6f} | {acc:<8.4f}"
+                    )
 
-            if global_step % train_config.save_interval == 0:
-                ckpt_path = output_dir / f"step_{global_step}"
-                model.save_pretrained(ckpt_path)
-                tokenizer.save_pretrained(ckpt_path)
-                print(f"  [Saved] {ckpt_path}")
+                if eval_loader and global_step % train_config.eval_interval == 0:
+                    metrics = evaluate(model, eval_loader, token_yes_id, token_no_id, device)
+                    print(
+                        f"  [Eval] Loss: {metrics['loss']:.4f}, Accuracy: {metrics['accuracy']:.4f}"
+                    )
+
+                    if writer:
+                        writer.add_scalar("eval/loss", metrics["loss"], global_step)
+                        writer.add_scalar("eval/accuracy", metrics["accuracy"], global_step)
+
+                    model.train()
+
+                if global_step % train_config.save_interval == 0:
+                    ckpt_path = output_dir / f"step_{global_step}"
+                    model.save_pretrained(ckpt_path)
+                    tokenizer.save_pretrained(ckpt_path)
+                    print(f"  [Saved] {ckpt_path}")
 
     # Save final model
     final_path = output_dir / "final"
